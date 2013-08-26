@@ -1,0 +1,99 @@
+<?php
+
+$this->setLayout('admin/user-layout.phtml');
+
+?>
+
+<div id="user-access-info">
+<hr />
+<h1>User Subscriptions</h1>
+<div class="user-access-title" data-status=".access-1,.access-2"><?php __e("User currently has following subscriptions"); ?>:</div>
+<br />
+<form <?php echo $accessForm->_attributes?> >
+<div class="grid-container">
+<table class="grid">
+<tr>
+    <th><b><?php __e("Product")?></b></th>
+    <th><b><?php __e("From")?></b></th>
+    <th><b><?php __e("To")?></b></th>
+    <th><b><?php __e("Status")?></b></th>
+    <th><b><?php __e("Source")?></b></th>
+	<th><b><?php __e("Paid")?></b></th>
+	<th><b><?php __e("Amount")?></b></th>
+    <th><b><?php __e("Edit")?></b></th>
+</tr>
+<?php $trAccessStatus = 
+            array(
+                Access::EXPIRED => '<i>'.___('Expired').'</i>', 
+                Access::ACTIVE  => '<b>' . ___('Active').'</b>',
+                Access::FUTURE  => '<i><b>'.___('Future').'</b></i>',
+            ); ?>
+<?php $iconEdit = $this->icon('edit', 'Edit') ?>
+<?php $iconAdd = $this->icon('add', 'Add') ?>
+<?php foreach ($accessRecords as $access): $access = (object)$access; ?>
+<tr class="access access-<?php echo $access->getStatus()?>">
+    <td><?php echo '#'. $access->product_id . ' - ' . $access->product_title; ?></td>
+    <td><?php echo $access->begin_date ? amDate($access->begin_date) : "" ?></td>
+    <td><?php 
+    if ($access->expire_date == Am_Period::MAX_SQL_DATE)
+        __e('Lifetime');
+    elseif ($access->expire_date == Am_Period::RECURRING_SQL_DATE)
+        __e('Recurring');
+    else    
+        echo $access->expire_date ? amDate($access->expire_date) : "" ; ?></td>
+    <td><?php echo $trAccessStatus[$access->getStatus()]; ?></td>
+    <td><?php echo $access->invoice_id ? "Invoice (#{$access->invoice_id})" : ___("Manually Added") ?></td>
+	<td><?php echo $access->invoice_payment_id ? "<b>YES</b> ($access->paysys_id)" : 'NO'; ?></td>
+	<td><?php echo $access->invoice_payment_id ? "$$access->amount" : '-'; ?></td>
+    <td><?php echo $access->invoice_payment_id ? "<a href='javascript:' class='subscription-edit' id='subscription-edit' aid='$access->access_id' title='Edit'>$iconEdit</a>" : "<a href='javascript:' class='subscription-add' aid='$access->access_id' id='subscription-add' title='Add'>$iconAdd</a>"; ?></td>
+</tr>
+<?php endforeach; ?>
+<tr>
+    <td><?php echo $accessForm->product_id ?></td>
+    <td><?php echo $accessForm->begin_date ?></td>
+    <td><?php echo $accessForm->expire_date ?></td>
+    <td colspan="5"><?php echo $accessForm->save ; echo $accessForm->_hidden; ?></td>
+</tr>
+</table>
+</div>
+</form>
+</div>
+
+<div id="subscription-info"></div>
+
+<script>
+$(".subscription-edit, .subscription-add").click(function()
+{
+    var $this = $(this);
+	var id = $this.attr('aid');
+	console.log(id);
+    $("#subscription-info").html("Loading...")
+        .load(window.rootUrl + "/subscriptioner/admin/subscription/id/" + id, function() {
+			$('#subscription-info input.datepicker').datepicker({
+                defaultDate: window.uiDefaultDate,
+                dateFormat: window.uiDateFormat,
+                changeMonth: true,
+                changeYear: true
+            });
+		});
+    $("#subscription-info").dialog({
+        autoOpen: true,
+		position: { my: "center", at: "center top", of: window }
+        ,width: 600
+        ,buttons: {
+        }
+        ,closeOnEscape: true
+        ,title: "<?php j(___("Subscription"))?>"
+        ,modal: true
+    });    
+});
+$("#subscription-info-form").live('submit', function() {
+    $(this).ajaxSubmit({success: function(data){
+            if (data.ok) 
+                window.location.reload();
+            else
+                $("#subscription-info").html(data);
+    }});
+    return false;
+});
+</script>
