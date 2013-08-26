@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module>
+    <id>subscriptioner</id>
+    <name>Subscriptioner</name>
+    <desc>Functionality to edit user subscriptions</desc>
+    <version>1.0</version>
+</module>
