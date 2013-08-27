@@ -171,11 +171,17 @@ class Subscriptioner_AdminController extends Am_Controller
 					WHERE access_id=?d",
 					$p, $d1, $d2, $id, $iid, $tid, $aid);
 				$s = 1;
-				if(strtotime($d2) <= strtotime("now")) $s = 2;
+				if(strtotime($d2) < strtotime(date('Y-m-d'))) $s = 2;
 				$this->getDi()->db->query("UPDATE ?_user_status SET
 					status=?d
 					WHERE user_id=?d AND product_id=?d",
 					$s, $uid, $p);
+                if($s == 1) {
+                    $this->getDi()->db->query("UPDATE ?_user SET
+                        status=?d
+                        WHERE user_id=?d",
+                        $s, $uid);
+                }
 				return $this->ajaxResponse(array('ok'=>true));
             } catch(Am_Exception $e) {
 				var_dump($e);
