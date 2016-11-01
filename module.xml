@@ -2,6 +2,6 @@
 <module>
     <id>subscriptioner</id>
     <name>Subscriptioner</name>
-    <desc>Functionality to edit user subscriptions</desc>
-    <version>1.0</version>
+    <desc>Functionality to Edit User Subscriptions</desc>
+    <version>2.0</version>
 </module>

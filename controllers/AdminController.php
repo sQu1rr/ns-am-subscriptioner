@@ -1,210 +1,409 @@
 <?php
+/**
+ * Subscriptioner controller
+ *
+ * @copyright 2016 Linguistica 360
+ */
 
-class Subscriptioner_AdminController extends Am_Controller 
-{
+/**
+ * Override some functions in transactions to simplify workflow
+ * Standard transaction does not allow the paysystem to be different with the
+ * existing ones
+ */
+class Am_Paysystem_Transaction_Subscriptioner
+        extends Am_Paysystem_Transaction_Manual {
+    public function setPaysysId($paysys)
+    {
+        $this->paysys = $paysys;
+    }
+
+    /** @override */
+    public function getPaysysId()
+    {
+        return $this->paysys;
+    }
+
+    /** @override */
+    public function getRecurringType()
+    {
+        return Am_Paysystem_Abstract::REPORTS_REBILL;
+    }
+
+    private $paysys; /**< payment system ID */
+}
+
+
+class Subscriptioner_AdminController extends Am_Controller {
+    /** @override */
     public function checkAdminPermissions(Admin $admin)
     {
         return $admin->isSuper(); // only super-admins allowed to open this
     }
-    
-    function indexAction()
-    {
-        $this->view->title = "Subscriptioner Module Admin Page";
-        $this->view->content = "Some HTML specific for your module admin page";
-        // lay it out to admin header/footer
-        $this->view->display('admin/layout.phtml');
-    }
-	
+
+    /**
+     * Render the content of a tab in an admin panel
+     */
 	function subscriptionsTabAction()
     {
-		$this->user_id = $this->getInt('user_id');
-        if (!$this->user_id)
-            throw new Am_Exception_InputError("Wrong URL specified: no member# passed");
-        $this->view->user_id = $this->user_id;
-		
-		$this->getDi()->plugins_payment->loadEnabled();
-        $this->view->invoices = $this->getDi()->invoiceTable->findByUserId($this->user_id);
-        
-        foreach($this->view->invoices as $invoice)
-        {
-            if ($invoice->getStatus() == Invoice::RECURRING_ACTIVE)
-            {
-                $invoice->_cancelUrl = null;
-                $ps = $this->getDi()->plugins_payment->loadGet($invoice->paysys_id, false);
-                if ($ps)
-                    $invoice->_cancelUrl = $ps->getAdminCancelUrl($invoice);
+        // extract user id from URL
+		$user_id = $this->getInt('user_id');
+
+        $accessRecords = $this->getDi()->accessTable->findBy([
+            'user_id' => $user_id
+        ]);
+
+        // add additional information
+        foreach ($accessRecords as $record) {
+            // add product title
+            $product = $this->getDi()->productTable->load($record->product_id);
+            $record->product_title = $product->title;
+
+            // if invoice exists populate payment system and amount
+            $invoice = $record->getInvoice();
+            if ($invoice) {
+                $record->paysys_id = $invoice->paysys_id;
+
+                $payments = $invoice->getPaymentRecords();
+                if (count($payments)) {
+                    $record->amount = $payments[0]->amount;
+                }
             }
         }
 
-        $this->view->accessRecords = $this->getAccessRecords();
-		
+        // populate view with necessary information
+        $this->view->user_id = $user_id;
+        $this->view->accessRecords = $accessRecords;
+
+        // render view
 		$this->view->title = "User Subscriptions";
-		$this->view->content = "Some Content";
 		$this->view->display('admin/subscriptioner/subscriptions.phtml');
     }
-	
-	function getSubscriptionInfo($id) {
-		return $this->getDi()->db->select("
-			SELECT a.*, p.product_id, p.title as product_title,
-			m.amount, m.paysys_id, m.receipt_id
-            FROM ?_access a
-			LEFT JOIN ?_product p USING (product_id)
-			LEFT JOIN ?_invoice_payment m USING (invoice_payment_id)
-            WHERE a.access_id = ?d
-            ", $id);
-	}
-	
+
+    /**
+     * Remove given access and invoice and return back to the list
+     */
+    function removeAction()
+    {
+        // extract access and user ids from URL
+        $aid = $this->getInt('id');
+        $uid = $this->getInt('user_id');
+
+        // find access
+        $access = $this->getDi()->accessTable->load($aid);
+        if ($access) {
+            // search of invoice
+            $invoice = $access->getInvoice();
+
+            // remove invoice (which will delete access as well) or just access
+            if ($invoice) $invoice->delete();
+            else $access->delete();
+        }
+
+        // redirect user back to user subscription list
+        $url = REL_ROOT_URL . '/subscriptioner/admin/subscriptions-tab/user_id';
+        $this->redirectLocation("$url/$uid");
+    }
+
+    /**
+     * Handles subscription form for jquery dialogue
+     * Called for both displaying form initially and submitting the form
+     *
+     * This function is so long because amember makes it really hard to separate
+     * the form initialisation, from form submission and it will probably
+     * require twice as much code, at least I documented it.
+     */
 	function subscriptionAction()
     {
-		$aid = $this->getInt('id');
-		
-		if($aid <= 0) throw new Am_Exception_InputError("Wrong Access #");
-		$access = $this->getDi()->db->select("SELECT invoice_id, invoice_payment_id, user_id FROM ?_access WHERE access_id=?d", $aid);
-		$id = $access[0]['invoice_payment_id'];
-		$iid = $access[0]['invoice_id'];
-		$tid = $access[0]['transaction_id'];
-		$uid = $access[0]['user_id'];
-		
-		//var_dump($id, $iid);
-		
-		$info = $this->getSubscriptionInfo($aid);
-		if(empty($info) || empty($info[0])) throw new Am_Exception_InputError("Wrong Payment #");
-		$info = $info[0];
-		
-		$pr = $this->getDi()->productTable->load($info['product_id']);
-		$pk = $pr->pk();
-		
-		if($id <= 0) {
-			$info['receipt_id'] = 'manual';
-			$info['amount'] = '0.00';
-		}
+        // extract invoice id
+		$id = $this->getInt('id');
+        $user_id = $this->getInt('user_id');
+
+        // current invoice records
+        $item = $payment = $plan = $planId = $access = null;
+
+        // if invoice already exists, get its records from the database
+        if ($id) {
+            $invoice = $this->getDi()->invoiceTable->load($id);
+
+            if ($invoice) {
+                // payment records, may not exist yet
+                $payments = $invoice->getPaymentRecords();
+                if (count($payments)) $payment = $payments[0];
+
+                // access records, may not exist yet (created on payment)
+                $accesses = $invoice->getAccessRecords();
+                if (count($accesses)) $access = $accesses[0];
+
+                // item (product) and its billing plan, should always exist
+                $items = $invoice->getItems();
+                if (count($items)) {
+                    $item = $items[0];
+                    $planId = $item->billing_plan_id;
+                    $plan = $this->getDi()->billingPlanTable->load($planId);
+                }
+            }
+        }
 
 		// form
         $form = new Am_Form_Admin('subscription-info-form');
-        $form->setDataSources(array($this->_request));
-        $form->method = 'post';
-        $form->addHidden('invoice_id')->setValue($iid);
-		
-		if($form->isSubmitted()) $pk = 0;
-		
-		// product
-        $sel = $form->addSelect('product_id')->setLabel('Subscription');    
-        foreach($this->getDi()->billingPlanTable->getProductPlanOptions() as $k => $v)
-			$sel->addOption($v, $k, strpos($k, $pk.'-') === 0 ? "selected='selected'" : '');
-		$sel->addRule('required');
-			
-		// dates
-		$date_begin = $form->addDate('begin_date')->setLabel('Subscription Begin');
-		if(!$form->isSubmitted()) $date_begin->setValue(amDate($info['begin_date']));
-		$date_begin->addRule('required');
-		$date_end = $form->addDate('expire_date')->setLabel('Subscription End');
-		if(!$form->isSubmitted()) $date_end->setValue(amDate($info['expire_date']));
-		$date_end->addRule('required');
-		
+
+        $form->setDataSources([$this->_request]);
+        $form->method = 'POST';
+
+        // that determines if the form is submitted or reqested
+        $submitted = $form->isSubmitted();
+
+		// product selection
+        $products = $form->addSelect('product_id')->setLabel('Subscription')
+            ->setId('products');
+		$products->addRule('required');
+
+        // populate product selection from all billing plans in the database
+        $plans = $this->getDi()->billingPlanTable->selectAllSorted();
+        foreach ($plans as $value) {
+            $term = $value->first_period;
+            $product = $value->getProduct();
+            $name = "$product->title ({$value->getTerms()})";
+            $amount = $value->first_price;
+            $attributes = "data-term=\"$term\" data-price=\"$amount\"";
+            $products->addOption($name, $value->plan_id, $attributes);
+        }
+
+		// date subscription (access) starts
+		$dateBegin = $form->addDate('begin_date')->setLabel('Start Date')
+            ->setId('begin_date');
+		$dateBegin->addRule('required');
+
+        // date subscription (access) ends
+        $dateEnd = $form->addDate('expire_date')->setLabel('End Date')
+            ->setId('expire_date');
+		$dateEnd->addRule('required');
+
 		// payment system
-		if($form->isSubmitted()) $info['paysys_id'] = 0;
-		$sel2 = $form->addSelect('paysys_id')->setLabel(___('Payment System'));
-		foreach ($this->getDi()->paysystemList->getOptions() as $k => $v)
-			$sel2->addOption($v, $k, ($k === $info['paysys_id']) ? "selected='selected'" : '');
-		$sel2->addOption('Manual', 'manual', ("manual" === $info['paysys_id']) ? "selected='selected'" : '');
-        $sel2->addRule('required');
-		
+        $paysys = $form->addSelect('paysys_id')->setLabel('Payment System')
+            ->setId('paysys');
+        $paysys->addRule('required');
+
+        // first in the list is "manual" transaction
+		$paysys->addOption('Manual', 'manual');
+
+        // later in the list we get all available paysystems
+        $paysystems = $this->getDi()->paysystemList->getOptions();
+		foreach ($paysystems as $key => $value) {
+            $paysys->addOption($value, $key);
+        }
+
 		// receipt
-		$receipt = $form->addText('receipt')->setLabel(___('Receipt, #'))
+		$receipt = $form->addText('receipt')->setLabel('Receipt, #')
             ->setId('invoice-receipt');
-		if(!$form->isSubmitted()) $receipt->setValue($info['receipt_id']);
-		
+        $receipt->addRule('required');
+
 		// amount
-		$amount = $form->addText('amount')->setLabel(___('Amount, $'))
+		$amount = $form->addText('amount')->setLabel('Amount, $')
             ->setId('payment-amount');
-		if(!$form->isSubmitted()) $amount->setValue($info['amount']);
-		
+        $amount->addRule('required');
+
 		// save
-        $form->addSubmit('_save', array('value' => ___('Save')));
-        if ($form->isSubmitted() && $form->validate())
-        {
-			list($p,$b) = explode("-", $sel->getValue(), 2);
-			$d1 = $date_begin->getValue();
-			$d2 = $date_end->getValue();
-			$pay = $sel2->getValue();
-			$re = $receipt->getValue();
-			$am = $amount->getValue();
-            try {
-				if($iid <= 0) {
-					// create invoice
-					$invoice = $this->getDi()->invoiceRecord;
-					$invoice->setUser($this->getDi()->userTable->load($info['user_id']));
-					$invoice->tm_added = sqlTime(date("Y-m-d"));
-					$products = $this->getDi()->billingPlanTable->load($b);
-					$product = $products->getProduct();
-					$invoice->add($product, 1);
-					$invoice->calculate();
-					$invoice->setPaysystem('paypal');
-					$invoice->data()->set('added-by-admin', $this->getDi()->authAdmin->getUserId());
-					$invoice->save();
-					$temp = $this->getDi()->db->query("SELECT invoice_id FROM ?_invoice
-						ORDER BY invoice_id DESC");
-					$iid = $temp[0]['invoice_id'];
-					$this->getDi()->db->query("UPDATE ?_invoice SET status=1 WHERE invoice_id=?d", $iid);
-				}
-				$this->getDi()->db->query("UPDATE ?_invoice SET paysys_id=?, first_total=?d WHERE invoice_id=?d", $pay, $am, $iid);
-				if($id > 0) {
-					$this->getDi()->db->query("
-						UPDATE ?_invoice_payment
-						SET paysys_id=?, receipt_id=?, dattm=?, amount=?
-						WHERE invoice_id=?d",
-						$pay, $re, date("Y-m-d"), (float)$am, $iid);
-				}
-				else {
-					$tid = 'manual-manual-'.time();
-					$this->getDi()->db->query("
-						INSERT INTO ?_invoice_payment
-						(invoice_id, user_id, paysys_id, receipt_id, transaction_id, dattm, currency, amount)
-						VALUES (?d, ?d, ?, ?, ?, ?, 'USD', ?)
-					", $iid, $info['user_id'], $pay, $re, $tid, date("Y-m-d"), (float)$am, $aid);
-					$temp = $this->getDi()->db->query("SELECT invoice_payment_id FROM ?_invoice_payment
-						WHERE invoice_id=?d ORDER BY invoice_payment_id DESC", $iid);
-					$id = $temp[0]['invoice_payment_id'];
-				}
-				$this->getDi()->db->query("UPDATE ?_access SET
-					product_id=?d, begin_date=?, expire_date=?, invoice_payment_id=?, invoice_id=?, transaction_id=?
-					WHERE access_id=?d",
-					$p, $d1, $d2, $id, $iid, $tid, $aid);
-				$s = 1;
-				if(strtotime($d2) < strtotime(date('Y-m-d'))) $s = 2;
-				$this->getDi()->db->query("UPDATE ?_user_status SET
-					status=?d
-					WHERE user_id=?d AND product_id=?d",
-					$s, $uid, $p);
-                if($s == 1) {
-                    $this->getDi()->db->query("UPDATE ?_user SET
-                        status=?d
-                        WHERE user_id=?d",
-                        $s, $uid);
+        $form->addSubmit('_save', ['value' => 'Save']);
+
+        if ($form->isSubmitted() && $form->validate()) {
+            // for is being submitted, so save the changes to the database,
+            // we do not validate for now, the user should know what is he
+            // doing
+
+            if (!$invoice) {
+                // it is a new subscription, so we need to create an invoice
+                $invoice = $this->getDi()->invoiceRecord;
+                $invoice->user_id = $user_id;
+
+                // hack: initialise inner user: setUser does not set user_id,
+                // and vise versa
+                $invoice->getUser();
+
+                $invoice->tm_added = sqlTime(date("Y-m-d"));
+            }
+
+            // get selected plan and see if that matches current plan, if it
+            // exists
+            $newPlan = $products->getValue();
+            if (!$plan || $newPlan != $planId) {
+                // if not lets remove replace it with the new one
+                $planId = $newPlan;
+
+                // first we find it in the database and get its product
+                $plan = $this->getDi()->billingPlanTable->load($planId);
+                $product = $plan->getProduct();
+
+                // then we remove it from invoice if it exists
+                if ($item) $invoice->deleteItem($item);
+                // and replace it with the new one (or just adding a new one)
+                $invoice->add($product);
+
+                // initialise current item with newly added product
+                $item = $invoice->getItems()[0];
+            }
+
+            // calculate all numbers we don't care about
+            $invoice->calculate();
+
+            // set the ones we do care about
+            $invoice->first_total = $amount->getValue();
+            $invoice->first_subtotal = $amount->getValue();
+
+            // set payment system (thankfully it doesn't get validated)
+            $oldpaysys = $invoice->paysys_id;
+            $invoice->paysys_id = $paysys->getValue();
+
+            // not sure why we do this, but why not
+            $invoice->data()->set('added-by-admin',
+                                  $this->getDi()->authAdmin->getUserId());
+
+            // save or create the invoice
+            $invoice->save();
+
+            if ($paysys->getValue() === 'free') {
+                if ($oldpaysys !== 'free') {
+                    $free = $this->getDi()->plugins_payment->get('free');
+                    $trans = new Am_Paysystem_Transaction_Free($free);
+
+                    // add transaction to invoice
+                    $invoice->addAccessPeriod($trans);
                 }
-				return $this->ajaxResponse(array('ok'=>true));
-            } catch(Am_Exception $e) {
-				var_dump($e);
-				echo "Error has occured, please recheck the data";
+
+                if ($payment) {
+                    $payment->delete();
+                    $payment = null;
+                }
+            }
+            else if (!$payment) {
+                $trans = new Am_Paysystem_Transaction_Subscriptioner();
+
+                // set initial payment parameters for validation
+                $trans->setPaysysId($paysys->getValue());
+                $trans->setAmount($amount->getValue())
+                    ->setReceiptId($receipt->getValue())
+                    ->setTime(new DateTime());
+
+                // add payment to the invoice
+                $payment = $invoice->addPayment($trans);
+            }
+
+            if ($payment) {
+                // set payment details (maybe the same, but why not)
+                $payment->amount = $invoice->first_total;
+                $payment->paysys_id = $paysys->getValue();
+                $payment->receipt_id = $receipt->getValue();
+
+                // save or create payment
+                $payment->save();
+            }
+
+            $invoice->updateStatus();
+
+            // access records, should always exist
+            $accesses = $invoice->getAccessRecords();
+
+            if (count($accesses)) {
+                $access = $accesses[0];
+
+                // set new or same (we don't care) date and product
+                $access->begin_date = $dateBegin->getValue();
+                $access->expire_date = $dateEnd->getValue();
+                $access->product_id = $plan->product_id;
+
+                if ($payment) {
+                    $access->invoice_payment_id = $payment->invoice_payment_id;
+                }
+                else $access->invoice_payment_id = null;
+
+                // save chanes (or save the same record once more)
+                $access->save();
+            }
+
+            // after changes we update user cache because weird amember caches
+            // lots of stuff for no sensible reason
+            $this->getDi()->resourceAccessTable->updateCache($user_id);
+
+            // change product on the invoice price, so user can see the changed
+            // price, this might actually interfere with upgrade plugin
+            if ($item) {
+                $item->first_price = $item->first_total = $invoice->first_total;
+                $item->save();
+            }
+
+            // OK, all done, lets let the browser know we are done
+            return $this->ajaxResponse([ 'ok' => true ]);
+        }
+        else {
+            // populate form with values from database or with the default
+            // values
+
+            // product
+            if ($item && $plan) {
+                // if invoice has product selected
+                $productId = $plan->product_id;
+                $products->setValue($planId);
+            } // otherwise the first product will be selected
+
+            // payment system
+            if ($invoice && $invoice->paysys_id) {
+                // if invoice has payment system
+                $paysys->setValue($invoice->paysys_id);
+            } // otherwise the first payment system will be selected
+
+            // dates
+            if ($access) {
+                // if access record exists
+                $dateBegin->setValue(amDate($access->begin_date));
+                $dateEnd->setValue(amDate($access->expire_date));
+            }
+            else {
+                // set date begin to current date
+                $dateBegin->setValue(amDate(sqlTime(date('Y-m-d'))));
+
+                if ($plan) {
+                    // if payment is not done yet, and access does not exist,
+                    // but plan is already chosen, put the actual end date
+                    // according to the plan
+                    $duration = $plan->first_period;
+                    if ($duration != Am_Period::MAX_SQL_DATE) {
+                        // convert weird amember interval represenation to
+                        // something we can actually use
+                        $duration = str_replace('m', 'month', $duration);
+                        $duration = str_replace('y', 'year', $duration);
+                        $duration = time() + strtotime($duration);
+                    }
+                    $date = date('Y-m-d', $duration);
+                    $dateEnd->setValue(amDate(sqlTime($date)));
+                }
+                // otherwise we just set date to nothing, and let javascript
+                // initialise it according to randomly chosen product
+                else $dateEnd->setValue('');
+            }
+
+            // receipt and amount
+            if ($payment) {
+                // we can populate those only if payment is made
+                $receipt->setValue($payment->receipt_id);
+                $amount->setValue($payment->amount);
+            }
+            else {
+                // otherwise we use default values
+                $receipt->setValue('manual');
+
+                // for amount we use default price for the product
+                if ($invoice) $amount->setValue($invoice->first_total);
+                // or if it is not selected, just leave it zero
+                else $amount->setValue('0.00');
             }
         }
+
+        // now we convert the form to the string and echo, because... amember
         echo $form->__toString();
+
+        // someone said that you should chop off (N - 1) hands of a
+        // programmer, where N is number of echo's in his PHP library/script
+        //
+        // ... well, it's not my fault
     }
-	
-	function getAccessRecords()
-    {
-        return $this->getDi()->accessTable->selectObjects("SELECT a.*, p.title as product_title, m.amount, m.paysys_id
-            FROM ?_access a LEFT JOIN ?_product p USING (product_id)
-			LEFT JOIN ?_invoice_payment m USING (invoice_payment_id)
-            WHERE a.user_id = ?d
-            ORDER BY begin_date, expire_date, product_title
-            ", $this->user_id);
-    }
-	
-	function preDispatch()
-    {
-        
-    }
-	
-	protected $user_id;
 }
